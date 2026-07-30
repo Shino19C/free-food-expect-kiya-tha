@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Depends, HTTPException
@@ -17,8 +19,24 @@ except ImportError:
 
 Base.metadata.create_all(bind=engine)
 
+
+async def cleanup_loop():
+    while True:
+        await asyncio.sleep(3600)
+        db = SessionLocal()
+        try:
+            crud.cleanup_expired_sos(db)
+        finally:
+            db.close()
+
+
 app = FastAPI(title="SOS Backend")
 BASE_DIR = Path(__file__).resolve().parent
+
+
+@app.on_event("startup")
+def startup_event():
+    asyncio.create_task(cleanup_loop())
 
 
 @app.get("/", response_class=HTMLResponse)
