@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SOS Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      min-height: 100vh;
+    }
+    .sidebar {
+      padding: 1rem;
+      background: #111827;
+      border-right: 1px solid #334155;
+    }
+    .sidebar h1 {
+      margin-top: 0;
+      font-size: 1.3rem;
+    }
+    form {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+    input, button {
+      padding: 0.7rem;
+      border-radius: 0.5rem;
+      border: 1px solid #475569;
+      font-size: 1rem;
+    }
+    button {
+      background: #ef4444;
+      color: white;
+      cursor: pointer;
+      border: none;
+    }
+    button.secondary {
+      background: #2563eb;
+    }
+    .status {
+      margin-top: 0.8rem;
+      min-height: 1.2rem;
+      color: #fbbf24;
+    }
+    #map {
+      height: 100vh;
+      width: 100%;
+    }
+    @media (max-width: 900px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+      #map {
+        height: 60vh;
+      }
+      .sidebar {
+        border-right: none;
+        border-bottom: 1px solid #334155;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="sidebar">
+      <h1>Live SOS Map</h1>
+      <p>Send an SOS and other users will see it instantly on the map.</p>
+      <form id="sos-form">
+        <input id="device_id" name="device_id" placeholder="Device ID" required />
+        <input id="latitude" name="latitude" type="number" step="any" placeholder="Latitude" required />
+        <input id="longitude" name="longitude" type="number" step="any" placeholder="Longitude" required />
+        <input id="timestamp" name="timestamp" placeholder="Timestamp" required />
+        <button type="submit">Send SOS</button>
+        <button type="button" class="secondary" id="use-location">Use my location</button>
+      </form>
+      <div id="status" class="status">Waiting for reports…</div>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([20.5937, 78.9629], 2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const markerLayer = L.layerGroup().addTo(map);
+    const statusEl = document.getElementById('status');
+    const form = document.getElementById('sos-form');
+    const deviceInput = document.getElementById('device_id');
+    const latInput = document.getElementById('latitude');
+    const lonInput = document.getElementById('longitude');
+    const timestampInput = document.getElementById('timestamp');
+    let locationReady = false;
+    let locationAttempted = false;
+    let locationWatchId = null;
+    let locationPending = false;
+    let initialBoundsSet = false;
+
+    function setTimestamp() {
+      timestampInput.value = new Date().toISOString();
+    }
+
+    function showStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.style.color = isError ? '#f87171' : '#fbbf24';
+    }
+
+    function clearMarkers() {
+      markerLayer.clearLayers();
+    }
+
+    function addMarker(report) {
+      const color = report.status === 'RESOLVED' ? 'green' : 'red';
+      const marker = L.circleMarker([report.latitude, report.longitude], {
+        radius: 9,
+        color,
+        fillColor: color,
+        fillOpacity: 0.8
+      }).addTo(markerLayer);
+
+      marker.bindPopup(`
+        <strong>${report.device_id}</strong><br/>
+        Status: ${report.status}<br/>
+        Coordinates: ${report.latitude}, ${report.longitude}<br/>
+        Time: ${report.timestamp}
+      `);
+    }
+
+    function renderReports(reports) {
+      clearMarkers();
+      if (!reports.length) {
+        showStatus('No active SOS reports yet.');
+        return;
+      }
+      reports.forEach(addMarker);
+      if (!initialBoundsSet) {
+        const bounds = L.latLngBounds(reports.map(item => [item.latitude, item.longitude]));
+        map.fitBounds(bounds, { padding: [40, 40] });
+        initialBoundsSet = true;
+      }
+      showStatus(`${reports.length} SOS report${reports.length > 1 ? 's' : ''} visible.`);
+    }
+
+    async function loadReports() {
+      try {
+        const response = await fetch('/sos');
+        if (!response.ok) throw new Error('Unable to load reports');
+        const reports = await response.json();
+        renderReports(reports);
+      } catch (error) {
+        showStatus(error.message, true);
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const payload = {
+        device_id: deviceInput.value,
+        latitude: parseFloat(latInput.value),
+        longitude: parseFloat(lonInput.value),
+        timestamp: timestampInput.value || new Date().toISOString()
+      };
+
+      try {
+        const response = await fetch('/sos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error('Could not submit SOS');
+        showStatus('SOS sent successfully.');
+        form.reset();
+        setTimestamp();
+        deviceInput.focus();
+        await loadReports();
+      } catch (error) {
+        showStatus(error.message, true);
+      }
+    });
+
+    async function fallbackLocation() {
+      try {
+        const response = await fetch('https://ipapi.co/json/');
+        if (!response.ok) throw new Error('Network fallback failed');
+        const data = await response.json();
+        if (data.latitude && data.longitude) {
+          latInput.value = parseFloat(data.latitude).toFixed(6);
+          lonInput.value = parseFloat(data.longitude).toFixed(6);
+          locationReady = true;
+          showStatus('Used approximate location from network.');
+        }
+      } catch (error) {
+        locationReady = false;
+        showStatus('Location permission was denied or unavailable. Please allow location access and try again.', true);
+      }
+    }
+
+    function captureLocation() {
+      if (!window.isSecureContext) {
+        const secureUrl = `https://${window.location.hostname}:8443${window.location.pathname}`;
+        showStatus('Switching to HTTPS for location access…', true);
+        window.location.replace(secureUrl);
+        return;
+      }
+
+      if (!navigator.geolocation) {
+        fallbackLocation();
+        return;
+      }
+
+      if (locationPending) {
+        return;
+      }
+      locationPending = true;
+      locationAttempted = true;
+
+      const onSuccess = (position) => {
+        latInput.value = position.coords.latitude.toFixed(6);
+        lonInput.value = position.coords.longitude.toFixed(6);
+        locationReady = true;
+        locationPending = false;
+        if (locationWatchId !== null) {
+          navigator.geolocation.clearWatch(locationWatchId);
+          locationWatchId = null;
+        }
+        showStatus('Location captured from your device.');
+      };
+
+      const onError = () => {
+        locationPending = false;
+        fallbackLocation();
+      };
+
+      locationWatchId = navigator.geolocation.watchPosition(onSuccess, onError, {
+        enableHighAccuracy: true,
+        timeout: 30000,
+        maximumAge: 0
+      });
+
+      setTimeout(() => {
+        if (!locationReady && locationPending) {
+          navigator.geolocation.getCurrentPosition(onSuccess, onError, {
+            enableHighAccuracy: false,
+            timeout: 20000,
+            maximumAge: 60000
+          });
+        }
+      }, 4000);
+    }
+
+    document.getElementById('use-location').addEventListener('click', () => {
+      locationAttempted = false;
+      locationPending = false;
+      captureLocation();
+    });
+
+    window.addEventListener('focus', () => {
+      if (!locationReady) {
+        captureLocation();
+      }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && !locationReady) {
+        captureLocation();
+      }
+    });
+
+    setTimestamp();
+    captureLocation();
+    loadReports();
+    setInterval(loadReports, 5000);
+  </script>
+</body>
+</html>

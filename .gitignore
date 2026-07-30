@@ -1,0 +1,18 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Database files
+*.db
+
+# Local environment
+.env
+venv/
+
+# SSL certs
+Lamia/certs/
+
+# IDE files
+.vscode/
